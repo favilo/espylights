@@ -6,14 +6,48 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-esp32c3-hal = "0.3.0"
-esp-alloc = { version = "0.1.0", features = ["oom-handler"] }
-esp-backtrace = { version = "0.2.0", features = ["esp32c3", "panic-handler", "print-uart"] }
-riscv-rt = { version = "0.9", optional = true }
-esp-println = { version = "0.3.1", features = ["esp32c3"] }
-palette = { version = "0.6.1", default-features = false, features = ["libm"] }
+esp32c3-hal = "0.9.0"
+esp-alloc = { version = "0.3.0" }
+esp-backtrace = { version = "0.7.0", features = [
+    "esp32c3",
+    "panic-handler",
+    "print-uart",
+    "exception-handler",
+] }
+# riscv-rt = { version = "0.9", optional = true }
+esp-hal-common = { version = "0.9.0", features = ["esp32c3"] }
+esp-println = { version = "0.5.0", features = ["esp32c3"] }
+esp-wifi = { git = "https://github.com/esp-rs/esp-wifi", features = [
+    "esp32c3",
+    "esp32c3-async",
+    "async",
+    "embedded-svc",
+    "embassy-net",
+    "wifi",
+] }
+palette = { version = "0.7.1", default-features = false, features = ["libm"] }
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
+embassy-executor = { version = "0.2.0", features = [
+    "nightly",
+    "arch-riscv32",
+    "executor-thread",
+    "integrated-timers",
+] }
+# embassy-executor = { git = "https://github.com/embassy-rs/embassy/", rev = "fb27594", features = [
+#     "nightly",
+#     "arch-riscv32",
+#     "executor-thread",
+#     "integrated-timers",
+# ] }
+embassy-time = { version = "0.1.1", features = ["nightly", "log"], default-features = false }
+static_cell = "1.0.0"
+smart-leds = "0.3.0"
+esp-hal-smartled = { version = "0.2.0", features = ["esp32c3"] }
 
 [features]
-default = ["rt"]
-rt = ["riscv-rt"]
+default = ["embassy-time-systick", "embassy"]
+embassy-time-systick = [
+    "esp-hal-common/embassy-time-timg0",
+    # "embassy-time/tick-hz-16_000_000",
+]
+embassy = ["esp-hal-common/embassy"]

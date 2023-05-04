@@ -1,48 +1,100 @@
 #![no_std]
 #![no_main]
+#![feature(type_alias_impl_trait)]
 
-extern crate alloc;
+use embassy_executor::Executor;
+use embassy_time::{Duration, Timer};
 use esp32c3_hal::{
     clock::ClockControl,
-    pac::Peripherals,
+    gpio::{Bank0GpioRegisterAccess, SingleCoreInteruptStatusRegisterAccessBank0, Unknown},
     prelude::*,
-    pulse_control::{ClockSource, OutputChannel, PulseCode},
+    pulse_control::ClockSource,
+    soc::{gpio::Gpio8Signals, peripherals::Peripherals},
     timer::TimerGroup,
-    Delay, PulseControl, Rtc, IO,
+    PulseControl, Rtc, IO,
 };
 use esp_backtrace as _;
-use palette::Srgb;
+use esp_hal_common::{
+    gpio::{GpioPin, InputOutputPinType},
+    pulse_control::Channel0,
+};
+use esp_hal_smartled::{smartLedAdapter, SmartLedsAdapter};
+use esp_wifi::wifi::WifiMode;
+use smart_leds::{
+    brightness, gamma,
+    hsv::{hsv2rgb, Hsv},
+    SmartLedsWrite,
+};
+use static_cell::StaticCell;
 
 mod ws281x;
 
-#[global_allocator]
-static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
+static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 
-#[allow(dead_code)]
-fn init_heap() {
-    const HEAP_SIZE: usize = 32 * 1024;
+#[embassy_executor::task]
+async fn run_leds(
+    pulse: Channel0,
+    pin: GpioPin<
+        Unknown,
+        Bank0GpioRegisterAccess,
+        SingleCoreInteruptStatusRegisterAccessBank0,
+        InputOutputPinType,
+        Gpio8Signals,
+        8,
+    >,
+) {
+    let mut led = <smartLedAdapter!(1)>::new(pulse, pin);
+    let mut color = Hsv {
+        hue: 0,
+        sat: 255,
+        val: 255,
+    };
 
-    extern "C" {
-        static mut _heap_start: u32;
-    }
-
-    unsafe {
-        let heap_start = &_heap_start as *const _ as usize;
-        ALLOCATOR.init(heap_start as *mut u8, HEAP_SIZE);
+    let mut data;
+    loop {
+        for hue in 0..=255 {
+            color.hue = hue;
+            // Convert from the HSV color space (where we can easily transition from one
+            // color to the other) to the RGB color space that we can then send to the LED
+            data = [hsv2rgb(color)];
+            // When sending to the LED, we do a gamma correction first (see smart_leds
+            // documentation for details) and then limit the brightness to 10 out of 255 so
+            // that the output it's not too bright.
+            led.write(brightness(gamma(data.iter().cloned()), 10))
+                .unwrap();
+            Timer::after(Duration::from_millis(20)).await;
+        }
     }
 }
-#[riscv_rt::entry]
+
+#[embassy_executor::task]
+async fn connection() {
+    loop {
+        esp_println::println!("Bing!");
+        Timer::after(Duration::from_millis(5_000)).await;
+    }
+}
+
+#[entry]
 fn main() -> ! {
-    init_heap();
-    let peripherals = Peripherals::take().unwrap();
+    esp_println::println!("Starting!");
+    let peripherals = Peripherals::take();
     let mut system = peripherals.SYSTEM.split();
     let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
 
     // Disable the RTC and TIMG watchdog timers
     let mut rtc = Rtc::new(peripherals.RTC_CNTL);
-    let timer_group0 = TimerGroup::new(peripherals.TIMG0, &clocks);
+    let timer_group0 = TimerGroup::new(
+        peripherals.TIMG0,
+        &clocks,
+        &mut system.peripheral_clock_control,
+    );
     let mut wdt0 = timer_group0.wdt;
-    let timer_group1 = TimerGroup::new(peripherals.TIMG1, &clocks);
+    let timer_group1 = TimerGroup::new(
+        peripherals.TIMG1,
+        &clocks,
+        &mut system.peripheral_clock_control,
+    );
     let mut wdt1 = timer_group1.wdt;
 
     rtc.swd.disable();
@@ -50,10 +102,17 @@ fn main() -> ! {
     wdt0.disable();
     wdt1.disable();
 
+    #[cfg(feature = "embassy-time-systick")]
+    esp_hal_common::embassy::init(
+        &clocks,
+        timer_group0.timer0,
+    );
+
+    #[cfg(feature = "embassy-time-timg0")]
+    embassy::init(&clocks, timer_group0.timer0);
+
     let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
 
-    // Set GPIO7 as an output, and set its state high initially.
-    // Configure RMT peripheral globally
     let pulse = PulseControl::new(
         peripherals.RMT,
         &mut system.peripheral_clock_control,
@@ -64,46 +123,12 @@ fn main() -> ! {
     )
     .unwrap();
 
-    let mut rmt_channel0 = pulse.channel0;
+    let (wifi, _ble) = peripherals.RADIO.split();
+    let (wifi_interface, wifi_controller) = esp_wifi::wifi::new_with_mode(wifi, WifiMode::Sta);
 
-    // Set up channel
-    rmt_channel0
-        .set_idle_output_level(false)
-        .set_carrier_modulation(false)
-        .set_channel_divider(1)
-        .set_idle_output(true);
-
-    let rmt_channel0 = rmt_channel0.assign_pin(io.pins.gpio8);
-    let mut ws2811 = ws281x::Ws281X::new(rmt_channel0);
-
-    let mut seq = [PulseCode {
-        level1: true,
-        length1: 0u32.nanos(),
-        level2: false,
-        length2: 0u32.nanos(),
-    }; 128];
-
-    // -1 to make sure that the last element is a transmission end marker (i.e.
-    // lenght 0)
-    for i in 0..(seq.len() - 1) {
-        seq[i] = PulseCode {
-            level1: true,
-            length1: (10u32 * (i as u32 + 1u32)).nanos(),
-            level2: false,
-            length2: 60u32.nanos(),
-        };
-    }
-
-    // Initialize the Delay peripheral, and use it to toggle the LED state in a
-    // loop.
-    let mut delay = Delay::new(&clocks);
-
-    loop {
-        delay.delay_ms(500u32);
-        // Send sequence
-        ws2811.send_colors(&[Srgb::<u8>::new(255, 0, 0)]).unwrap();
-        // rmt_channel0
-        //     .send_pulse_sequence(RepeatMode::SingleShot, &seq)
-        //     .unwrap();
-    }
+    let executor = EXECUTOR.init(Executor::new());
+    executor.run(|spawner| {
+        spawner.spawn(run_leds(pulse.channel0, io.pins.gpio8)).ok();
+        spawner.spawn(connection()).ok();
+    });
 }
