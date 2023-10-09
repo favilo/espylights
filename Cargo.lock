@@ -411,6 +411,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "embedded-storage"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "156d7a2fdd98ebbf9ae579cbceca3058cff946e13f8e17b90e3511db0508c723"
+
+[[package]]
 name = "embedded-svc"
 version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -533,6 +539,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-storage"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c39d2dfde1b5ee68c8380ec801afdce6fd242270b40ea4cf2e943abf6efa591e"
+dependencies = [
+ "embedded-storage",
+]
+
+[[package]]
 name = "esp-wifi"
 version = "0.1.0"
 source = "git+https://github.com/esp-rs/esp-wifi#c446177984b82b5e1658d6b24318e7214460ded8"
@@ -595,12 +610,15 @@ name = "espylights"
 version = "0.1.0"
 dependencies = [
  "embassy-executor",
+ "embassy-net",
  "embassy-time 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embedded-storage",
  "esp-alloc",
  "esp-backtrace",
  "esp-hal-common",
  "esp-hal-smartled",
  "esp-println",
+ "esp-storage",
  "esp-wifi",
  "esp32c3-hal",
  "lazy_static",

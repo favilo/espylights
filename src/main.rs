@@ -2,8 +2,13 @@
 #![no_main]
 #![feature(type_alias_impl_trait)]
 
+extern crate alloc;
+
+use alloc::string::String;
 use embassy_executor::Executor;
+use embassy_net::{Config, Stack, StackResources};
 use embassy_time::{Duration, Timer};
+use embedded_storage::{ReadStorage, Storage};
 use esp32c3_hal::{
     clock::ClockControl,
     gpio::{Bank0GpioRegisterAccess, SingleCoreInteruptStatusRegisterAccessBank0, Unknown},
@@ -19,7 +24,8 @@ use esp_hal_common::{
     pulse_control::Channel0,
 };
 use esp_hal_smartled::{smartLedAdapter, SmartLedsAdapter};
-use esp_wifi::wifi::WifiMode;
+use esp_storage::FlashStorage;
+use esp_wifi::wifi::{WifiController, WifiMode};
 use smart_leds::{
     brightness, gamma,
     hsv::{hsv2rgb, Hsv},
@@ -28,6 +34,30 @@ use smart_leds::{
 use static_cell::StaticCell;
 
 mod ws281x;
+
+#[global_allocator]
+static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
+
+fn init_heap() {
+    const HEAP_SIZE: usize = 2 * 1024;
+
+    extern "C" {
+        static mut _heap_start: u32;
+    }
+    unsafe {
+        let heap_start = &_heap_start as *const _ as usize;
+        ALLOCATOR.init(heap_start as *mut u8, HEAP_SIZE);
+    }
+}
+
+macro_rules! singleton {
+    ($val:expr) => {{
+        type T = impl Sized;
+        static STATIC_CELL: StaticCell<T> = StaticCell::new();
+        let (x,) = STATIC_CELL.init(($val,));
+        x
+    }};
+}
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 
@@ -67,8 +97,20 @@ async fn run_leds(
     }
 }
 
+// Found some areas that are "free"
+// Or overwrite our own program memory.
+const WIFI_INFO_OFFSET: u32 = 0xc_000;
+
 #[embassy_executor::task]
-async fn connection() {
+async fn connection(mut controller: WifiController<'static>) {
+    let mut flash = FlashStorage::new();
+    esp_println::println!("Flash storage capacity: {}", flash.capacity());
+    let mut data = [0; 128];
+    let result = flash.read(WIFI_INFO_OFFSET, &mut data);
+    esp_println::println!("Result from reading memory: {result:?}");
+    let _ = result.unwrap();
+    esp_println::println!("Flash data at offset: {:?}", data);
+    esp_println::println!("Flash data at offset: {}", String::from_utf8_lossy(&data));
     loop {
         esp_println::println!("Bing!");
         Timer::after(Duration::from_millis(5_000)).await;
@@ -77,6 +119,7 @@ async fn connection() {
 
 #[entry]
 fn main() -> ! {
+    init_heap();
     esp_println::println!("Starting!");
     let peripherals = Peripherals::take();
     let mut system = peripherals.SYSTEM.split();
@@ -105,11 +148,11 @@ fn main() -> ! {
     #[cfg(feature = "embassy-time-systick")]
     esp_hal_common::embassy::init(
         &clocks,
-        timer_group0.timer0,
+        esp32c3_hal::systimer::SystemTimer::new(peripherals.SYSTIMER),
     );
 
     #[cfg(feature = "embassy-time-timg0")]
-    embassy::init(&clocks, timer_group0.timer0);
+    esp_hal_common::embassy::init(&clocks, timer_group0.timer0);
 
     let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
 
@@ -124,11 +167,20 @@ fn main() -> ! {
     .unwrap();
 
     let (wifi, _ble) = peripherals.RADIO.split();
-    let (wifi_interface, wifi_controller) = esp_wifi::wifi::new_with_mode(wifi, WifiMode::Sta);
+    let (wifi_interface, controller) = esp_wifi::wifi::new_with_mode(wifi, WifiMode::Sta);
+
+    let config = Config::Dhcp(Default::default());
+
+    let stack = &*singleton!(Stack::new(
+        wifi_interface,
+        config,
+        singleton!(StackResources::<3>::new()),
+        1234
+    ));
 
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
         spawner.spawn(run_leds(pulse.channel0, io.pins.gpio8)).ok();
-        spawner.spawn(connection()).ok();
+        spawner.spawn(connection(controller)).ok();
     });
 }
